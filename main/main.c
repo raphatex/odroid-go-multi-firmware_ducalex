@@ -12,6 +12,11 @@
 #include <driver/gpio.h>
 #include <driver/adc.h>
 
+
+#include "esp_flash.h"
+#include "esp_flash_partitions.h"
+#include <esp_vfs_fat.h>
+
 #if defined(ESP_IDF_VERSION_MAJOR) && ESP_IDF_VERSION_MAJOR >= 4
 #include <esp32/rom/crc.h>
 #else
@@ -60,19 +65,12 @@
 #define ITEM_COUNT                  ((SCREEN_HEIGHT-32)/52)
 
 #define ALIGN_ADDRESS(val, alignment) (((val & (alignment-1)) != 0) ? (val & ~(alignment-1)) + alignment : val)
-#define SET_STATUS_LED(on) gpio_set_level(GPIO_NUM_2, on);
 #define RG_MIN(a, b) ({__typeof__(a) _a = (a); __typeof__(b) _b = (b);_a < _b ? _a : _b; })
 #define RG_MAX(a, b) ({__typeof__(a) _a = (a); __typeof__(b) _b = (b);_a > _b ? _a : _b; })
 
-#ifdef TARGET_MRGC_G32
-#define HEADER_LENGTH 22
-#define HEADER_V00_01 "ESPLAY_FIRMWARE_V00_01"
-#define FIRMWARE_PATH SDCARD_BASE_PATH "/espgbc/firmware"
-#else
 #define HEADER_LENGTH 24
 #define HEADER_V00_01 "ODROIDGO_FIRMWARE_V00_01"
 #define FIRMWARE_PATH SDCARD_BASE_PATH "/odroid/firmware"
-#endif
 
 typedef struct
 {
@@ -154,18 +152,18 @@ static void UpdateDisplay(void)
 
 static void DisplayCenter(int top, const char *str)
 {
-    const int maxlen = SCREEN_WIDTH / (gui.font.char_width + 1);
+    const int maxlen = (SCREEN_WIDTH - LCD_SCREEN_MARGIN_LEFT - LCD_SCREEN_MARGIN_RIGHT) / (gui.font.char_width + 1);
     int left = RG_MAX(0, (SCREEN_WIDTH - strlen(str) * (gui.font.char_width + 1)) / 2);
     int height = gui.font.char_height + 4 + 4;
     char tempstring[128] = {0};
 
-    UG_FillFrame(0, top, SCREEN_WIDTH-1, top + height - 1, UG_GetBackcolor());
+    UG_FillFrame(LCD_SCREEN_MARGIN_LEFT, top, SCREEN_WIDTH-1-LCD_SCREEN_MARGIN_RIGHT, top + height - 1, UG_GetBackcolor());
     UG_PutString(left, top + 4 , strncpy(tempstring, str, maxlen));
 }
 
 static void DisplayPage(const char *title, const char *footer)
 {
-    UG_FillFrame(0, 0, SCREEN_WIDTH-1, SCREEN_HEIGHT-1, C_WHITE);
+    UG_FillFrame(LCD_SCREEN_MARGIN_LEFT, 0, SCREEN_WIDTH-1-LCD_SCREEN_MARGIN_RIGHT, SCREEN_HEIGHT-1, C_WHITE);
     UG_FontSelect(&FONT_8X8);
     UG_SetBackcolor(C_MIDNIGHT_BLUE);
     UG_SetForecolor(C_WHITE);
@@ -188,7 +186,7 @@ static void DisplayIndicators(int page, int totalPages)
     // Battery indicator
     int percent = (read_battery() - BATTERY_VMIN) / (BATTERY_VMAX - BATTERY_VMIN) * 100.f;
     sprintf(tempstring, "%d%%", RG_MIN(100, RG_MAX(0, percent)));
-    UG_PutString(SCREEN_WIDTH - (9 * strlen(tempstring)) - 4, 4, tempstring);
+    UG_PutString(SCREEN_WIDTH - LCD_SCREEN_MARGIN_RIGHT - (9 * strlen(tempstring)) - 4, 4, tempstring);
 }
 
 static void DisplayError(const char *message)
@@ -223,7 +221,7 @@ static void DisplayProgress(int percent)
     const int WIDTH = 200;
     const int HEIGHT = 12;
     const int FILL_WIDTH = WIDTH * ((percent > 100 ? 100 : percent) / 100.0f);
-    int left = (SCREEN_WIDTH / 2) - (WIDTH / 2);
+    int left = ((SCREEN_WIDTH-LCD_SCREEN_MARGIN_LEFT-LCD_SCREEN_MARGIN_RIGHT) / 2) - (WIDTH / 2);
     int top = (SCREEN_HEIGHT / 2) - (HEIGHT / 2) + 16;
     UG_FillFrame(left - 1, top - 1, left + WIDTH + 1, top + HEIGHT + 1, C_WHITE);
     UG_DrawFrame(left - 1, top - 1, left + WIDTH + 1, top + HEIGHT + 1, C_BLACK);
@@ -233,36 +231,36 @@ static void DisplayProgress(int percent)
 
 static void DisplayFooter(const char *message)
 {
-    int left = (SCREEN_WIDTH / 2) - (strlen(message) * 9 / 2);
+    int left = ((SCREEN_WIDTH-LCD_SCREEN_MARGIN_LEFT-LCD_SCREEN_MARGIN_RIGHT) / 2) - (strlen(message) * 9 / 2);
     int top = SCREEN_HEIGHT - (16 * 2) - 8;
     UG_FontSelect(&FONT_8X12);
     UG_SetForecolor(C_BLACK);
     UG_SetBackcolor(C_WHITE);
-    UG_FillFrame(0, top, SCREEN_WIDTH-1, top + 12, C_WHITE);
+    UG_FillFrame(LCD_SCREEN_MARGIN_LEFT, top, SCREEN_WIDTH-1-LCD_SCREEN_MARGIN_RIGHT, top + 12, C_WHITE);
     UG_PutString(left, top, message);
 }
 
 static void DisplayHeader(const char *message)
 {
-    int left = (SCREEN_WIDTH / 2) - (strlen(message) * 9 / 2);
+    int left = ((SCREEN_WIDTH-LCD_SCREEN_MARGIN_LEFT-LCD_SCREEN_MARGIN_RIGHT) / 2) - (strlen(message) * 9 / 2);
     int top = (16 + 8);
     UG_FontSelect(&FONT_8X12);
     UG_SetForecolor(C_BLACK);
     UG_SetBackcolor(C_WHITE);
-    UG_FillFrame(0, top, SCREEN_WIDTH-1, top + 12, C_WHITE);
+    UG_FillFrame(LCD_SCREEN_MARGIN_LEFT, top, SCREEN_WIDTH-1-LCD_SCREEN_MARGIN_RIGHT, top + 12, C_WHITE);
     UG_PutString(left, top, message);
 }
 
 static void DisplayRow(int line, const char *line1, const char *line2, uint16_t color, const uint16_t *tile, bool selected)
 {
-    const int margin = SCREEN_WIDTH > 240 ? 6 : 2;
+    const int margin = SCREEN_WIDTH-LCD_SCREEN_MARGIN_LEFT-LCD_SCREEN_MARGIN_RIGHT > 240 ? 6 : 2;
     const int itemHeight = 52;
     const int textLeft = margin + FIRMWARE_TILE_WIDTH + margin;
     const int top = 16 + (line * itemHeight) - 1;
 
     UG_FontSelect(&FONT_8X12);
     UG_SetBackcolor(selected ? C_YELLOW : C_WHITE);
-    UG_FillFrame(0, top + 2, SCREEN_WIDTH-1, top + itemHeight - 1 - 1, UG_GetBackcolor());
+    UG_FillFrame(LCD_SCREEN_MARGIN_LEFT, top + 2, SCREEN_WIDTH-1-LCD_SCREEN_MARGIN_RIGHT, top + itemHeight - 1 - 1, UG_GetBackcolor());
     UG_SetForecolor(C_BLACK);
     UG_PutString(textLeft, top + 2 + 2 + 7, line1);
     UG_SetForecolor(color);
@@ -272,7 +270,7 @@ static void DisplayRow(int line, const char *line1, const char *line2, uint16_t 
     {
         for (int i = 0 ; i < FIRMWARE_TILE_HEIGHT; ++i)
             for (int j = 0; j < FIRMWARE_TILE_WIDTH; ++j)
-                UG_DrawPixel(margin + j, top + 2 + i, tile[i * FIRMWARE_TILE_WIDTH + j]);
+                UG_DrawPixel(margin + j + LCD_SCREEN_MARGIN_LEFT, top + 2 + i, tile[i * FIRMWARE_TILE_WIDTH + j]);
     }
 }
 
@@ -298,12 +296,9 @@ static float read_battery(void)
 
 static void panic_abort(const char *reason)
 {
-    ESP_LOGE(__func__, "Panic: %s", reason);
     DisplayError(reason);
     int level = 0;
     while (true) {
-        SET_STATUS_LED(level);
-        level = !level;
         vTaskDelay(100 / portTICK_PERIOD_MS);
     }
 }
@@ -318,7 +313,6 @@ static void *safe_alloc(size_t size)
 
 static void cleanup_and_restart(void)
 {
-    gpio_set_direction(GPIO_NUM_2, GPIO_MODE_INPUT);
     odroid_sdcard_close();
     nvs_close(nvs_h);
     nvs_flash_deinit_partition(MFW_NVS_PARTITION);
@@ -412,7 +406,6 @@ static void read_app_table(void)
     firstAppOffset = app_table_part->address + app_table_part->size;
     firstAppOffset = ALIGN_ADDRESS(firstAppOffset, FLASH_BLOCK_SIZE);
 
-    ESP_LOGI(__func__, "Read app table (%d apps)", apps_count);
 }
 
 
@@ -440,8 +433,6 @@ static void write_app_table()
     {
         panic_abort("APP TABLE WRITE ERROR");
     }
-
-    ESP_LOGI(__func__, "Written app table (%d apps)", apps_count);
 }
 
 
@@ -450,7 +441,7 @@ static void write_partition_table(const odroid_app_t *app)
     esp_partition_info_t partitionTable[ESP_PARTITION_TABLE_MAX_ENTRIES];
     size_t nextPart = 0;
 
-    if (spi_flash_read(ESP_PARTITION_TABLE_OFFSET, &partitionTable, sizeof(partitionTable)) != ESP_OK)
+    if (esp_flash_read(NULL, (void*)partitionTable, ESP_PARTITION_TABLE_OFFSET, ESP_PARTITION_TABLE_MAX_LEN) != ESP_OK)
     {
         panic_abort("PART TABLE READ ERROR");
     }
@@ -466,7 +457,6 @@ static void write_partition_table(const odroid_app_t *app)
         if (part->pos.offset >= firstAppOffset)
             continue;
         partitionTable[nextPart++] = *part;
-        ESP_LOGI(__func__, "Keeping partition #%d '%s'", nextPart - 1, part->label);
     }
 
     // Append app's partitions, if any
@@ -486,8 +476,6 @@ static void write_partition_table(const odroid_app_t *app)
             part->flags = app->parts[i].flags;
 
             flashOffset += app->parts[i].length;
-
-            ESP_LOGI(__func__, "Added partition #%d '%s'", nextPart - 1, part->label);
         }
     }
 
@@ -497,12 +485,12 @@ static void write_partition_table(const odroid_app_t *app)
         memset(&partitionTable[nextPart++], 0xFF, sizeof(esp_partition_info_t));
     }
 
-    if (spi_flash_erase_range(ESP_PARTITION_TABLE_OFFSET, ERASE_BLOCK_SIZE) != ESP_OK)
+    if (esp_flash_erase_region(NULL, ESP_PARTITION_TABLE_OFFSET, ERASE_BLOCK_SIZE) != ESP_OK)
     {
         panic_abort("PART TABLE ERASE ERROR");
     }
 
-    if (spi_flash_write(ESP_PARTITION_TABLE_OFFSET, partitionTable, sizeof(partitionTable)) != ESP_OK)
+    if (esp_flash_write(NULL, partitionTable, ESP_PARTITION_TABLE_OFFSET, sizeof(partitionTable)) != ESP_OK)
     {
         panic_abort("PART TABLE WRITE ERROR");
     }
@@ -513,8 +501,6 @@ static void write_partition_table(const odroid_app_t *app)
 
 static void boot_application(odroid_app_t *app)
 {
-    ESP_LOGI(__func__, "Booting application.");
-
     if (app)
     {
         DisplayMessage("Updating partitions ...");
@@ -522,33 +508,13 @@ static void boot_application(odroid_app_t *app)
     }
 
     DisplayMessage("Setting boot partition ...");
-
-// This is the correct way of doing things, but we must patch esp-idf to allow us to reload the partition table
-// So, now, instead we just write the OTA partition ourselves. It is always the same (boot app OTA+0).
-#if 0
-    const esp_partition_t *partition = esp_partition_find_first(
-        ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, NULL);
-
-    if (!partition)
-    {
-        DisplayError("NO BOOT PART ERROR");
-        panic_abort();
-    }
-
-    if (esp_ota_set_boot_partition(partition) != ESP_OK)
-    {
-        DisplayError("BOOT SET ERROR");
-        panic_abort();
-    }
-#else
     uint32_t ota_data[8] = {1, 0, 0, 0, 0, 0, 0xFFFFFFFFU, 0x4743989A};
 
-    if (spi_flash_erase_range(0xD000, 0x1000) != ESP_OK
-        || spi_flash_write(0xD000, &ota_data, sizeof(ota_data)) != ESP_OK)
+    if (esp_flash_erase_region(NULL, 0xD000, 0x1000) != ESP_OK
+        || esp_flash_write(NULL, &ota_data, 0xD000, sizeof(ota_data)) != ESP_OK)
     {
         panic_abort("BOOT SET ERROR");
     }
-#endif
 
     cleanup_and_restart();
 }
@@ -585,23 +551,19 @@ static void defrag_flash(void)
     {
         if (apps[i].startOffset > nextStartOffset)
         {
-            SET_STATUS_LED(1);
-
             size_t app_size = apps[i].endOffset - apps[i].startOffset;
             size_t newOffset = nextStartOffset, oldOffset = apps[i].startOffset;
             // move
             for (size_t i = 0; i < app_size; i += FLASH_BLOCK_SIZE)
             {
-                ESP_LOGI(__func__, "Moving 0x%x to 0x%x", oldOffset + i, newOffset + i);
-
                 DisplayMessage("Defragmenting ... (E)");
-                spi_flash_erase_range(newOffset + i, FLASH_BLOCK_SIZE);
+                esp_flash_erase_region(NULL, newOffset + i, FLASH_BLOCK_SIZE);
 
                 DisplayMessage("Defragmenting ... (R)");
-                spi_flash_read(oldOffset + i, dataBuffer, FLASH_BLOCK_SIZE);
+                esp_flash_read(NULL, dataBuffer, oldOffset + i, FLASH_BLOCK_SIZE);
 
                 DisplayMessage("Defragmenting ... (W)");
-                spi_flash_write(newOffset + i, dataBuffer, FLASH_BLOCK_SIZE);
+                esp_flash_write(NULL, dataBuffer, newOffset + i, FLASH_BLOCK_SIZE);
 
                 totalBytesMoved += FLASH_BLOCK_SIZE;
 
@@ -610,8 +572,6 @@ static void defrag_flash(void)
 
             apps[i].startOffset = newOffset;
             apps[i].endOffset = newOffset + app_size;
-
-            SET_STATUS_LED(0);
         }
 
         nextStartOffset = apps[i].endOffset + 1;
@@ -625,7 +585,7 @@ static void defrag_flash(void)
 
 static void find_free_blocks(odroid_flash_block_t **blocks, size_t *count, size_t *totalFreeSpace)
 {
-    size_t flashSize = spi_flash_get_chip_size();
+    size_t flashSize = 8192000;
     size_t previousBlockEnd = firstAppOffset;
 
     *blocks = safe_alloc(sizeof(odroid_flash_block_t) * 32);
@@ -643,7 +603,6 @@ static void find_free_blocks(odroid_flash_block_t **blocks, size_t *count, size_
             block->offset = previousBlockEnd;
             block->size = free_space;
             *totalFreeSpace += block->size;
-            ESP_LOGI(__func__, "Found free block: %d 0x%x %d", i, block->offset, free_space / 1024);
         }
 
         previousBlockEnd = apps[i].endOffset + 1;
@@ -654,7 +613,6 @@ static void find_free_blocks(odroid_flash_block_t **blocks, size_t *count, size_
         block->offset = previousBlockEnd;
         block->size = (flashSize - previousBlockEnd);
         *totalFreeSpace += block->size;
-        ESP_LOGI(__func__, "Found free block: end 0x%x %d", block->offset, block->size / 1024);
     }
 }
 
@@ -749,7 +707,6 @@ static odroid_fw_t *firmware_get_info(const char *filename)
     // We try to steal some unused space if possible, otherwise we might waste up to 48K
     odroid_partition_t *part = &outData->parts[outData->parts_count - 1];
     if (part->type == ESP_PARTITION_TYPE_APP && (part->length - part->dataLength) >= APP_NVS_SIZE) {
-        ESP_LOGI(__func__, "Found room for NVS partition, reducing last partition size by %d", APP_NVS_SIZE);
         part->length -= APP_NVS_SIZE;
         outData->flashSize -= APP_NVS_SIZE;
     }
@@ -780,13 +737,10 @@ static void flash_firmware(const char *fullPath)
     void *dataBuffer = safe_alloc(FLASH_BLOCK_SIZE);
     char tempstring[128];
 
-    ESP_LOGI(__func__, "Flashing file: %s", fullPath);
-
     sort_app_table(LIST_SORT_OFFSET);
     DisplayPage("Install Application", "Destination: Pending");
     DisplayFooter("[B] Go Back");
     UpdateDisplay();
-    SET_STATUS_LED(0);
 
     if (!fw)
     {
@@ -810,9 +764,6 @@ static void flash_firmware(const char *fullPath)
     memcpy(app->tile, fw->header.tile, sizeof(app->tile));
     memcpy(app->parts, fw->parts, sizeof(app->parts));
     app->parts_count = fw->parts_count;
-
-    ESP_LOGI(__func__, "Destination: 0x%x", currentFlashAddress);
-    ESP_LOGI(__func__, "Description: '%s'", app->description);
 
     sprintf(tempstring, "Destination: 0x%x", currentFlashAddress);
     DisplayPage("Install Application", tempstring);
@@ -841,8 +792,6 @@ static void flash_firmware(const char *fullPath)
     DisplayFooter("");
     UpdateDisplay();
 
-    SET_STATUS_LED(1);
-
     FILE *file = fopen(fullPath, "rb");
     if (file == NULL)
     {
@@ -865,10 +814,8 @@ static void flash_firmware(const char *fullPath)
 
     if (checksum != fw->checksum)
     {
-        ESP_LOGE(__func__, "Checksum mismatch: expected: %#010x, computed:%#010x", fw->checksum, checksum);
         panic_abort("CHECKSUM MISMATCH ERROR");
     }
-    ESP_LOGI(__func__, "Checksum OK: %#010x", checksum);
 
     // restore location to end of description
     fseek(file, fw->dataOffset, SEEK_SET);
@@ -884,11 +831,8 @@ static void flash_firmware(const char *fullPath)
         // Skip header, firmware_get_info prepared everything for us
         fseek(file, sizeof(odroid_partition_t), SEEK_CUR);
 
-        SET_STATUS_LED(0);
-
         // Erase target partition space
         sprintf(tempstring, "Erasing ... (%d/%d)", i+1, app->parts_count);
-        ESP_LOGI(__func__, "%s", tempstring);
 
         DisplayProgress(0);
         DisplayMessage(tempstring);
@@ -896,9 +840,8 @@ static void flash_firmware(const char *fullPath)
         int eraseBlocks = slot->length / ERASE_BLOCK_SIZE;
         if (eraseBlocks * ERASE_BLOCK_SIZE < slot->length) ++eraseBlocks;
 
-        if (spi_flash_erase_range(currentFlashAddress, eraseBlocks * ERASE_BLOCK_SIZE) != ESP_OK)
+        if (esp_flash_erase_region(NULL, currentFlashAddress, eraseBlocks * ERASE_BLOCK_SIZE) != ESP_OK)
         {
-            ESP_LOGE(__func__, "spi_flash_erase_range failed. eraseBlocks=%d", eraseBlocks);
             panic_abort("ERASE ERROR");
         }
 
@@ -906,14 +849,11 @@ static void flash_firmware(const char *fullPath)
         {
             size_t nextEntry = ftell(file) + slot->dataLength;
 
-            SET_STATUS_LED(1);
-
             // Write data
             int totalCount = 0;
             for (int offset = 0; offset < slot->dataLength; offset += FLASH_BLOCK_SIZE)
             {
                 sprintf(tempstring, "Writing (%d/%d)", i+1, app->parts_count);
-                ESP_LOGI(__func__, "%s", tempstring);
                 DisplayProgress((float)offset / (float)(slot->dataLength - FLASH_BLOCK_SIZE) * 100.0f);
                 DisplayMessage(tempstring);
 
@@ -930,20 +870,16 @@ static void flash_firmware(const char *fullPath)
                 }
 
                 // flash
-                if (spi_flash_write(currentFlashAddress + offset, dataBuffer, count) != ESP_OK)
+                if (esp_flash_write(NULL, dataBuffer, currentFlashAddress + offset, count) != ESP_OK)
         		{
-        			ESP_LOGE(__func__, "spi_flash_write failed. address=%#08x", currentFlashAddress + offset);
                     panic_abort("WRITE ERROR");
         		}
 
                 totalCount += count;
             }
 
-            SET_STATUS_LED(0);
-
             if (totalCount != slot->dataLength)
             {
-                ESP_LOGE(__func__, "Size mismatch: length=%#08x, totalCount=%#08x", slot->dataLength, totalCount);
                 panic_abort("DATA SIZE ERROR");
             }
 
@@ -952,7 +888,6 @@ static void flash_firmware(const char *fullPath)
         }
 
         // Notify OK
-        ESP_LOGI(__func__, "Partition(%d): OK. Length=%#08x", i, slot->length);
         currentFlashAddress += slot->length;
     }
 
@@ -1003,8 +938,6 @@ static char *ui_choose_file(const char *path)
     char *result = NULL;
     int fileCount = odroid_sdcard_files_get(path, ".fw", &files);
     int currentItem = 0;
-
-    ESP_LOGI(__func__, "fileCount=%d", fileCount);
 
     while (true)
     {
@@ -1170,7 +1103,6 @@ static void ui_draw_app_page(int currentItem)
     for (int line = 0; line < ITEM_COUNT && (page + line) < apps_count; ++line)
     {
         odroid_app_t *app = &apps[page + line];
-        sprintf(tempstring, "0x%x - 0x%x", app->startOffset, app->endOffset);
         DisplayRow(line, app->description, tempstring, C_GRAY, app->tile, (page + line) == currentItem);
     }
 
@@ -1291,7 +1223,7 @@ static void start_normal(void)
                         odroid_partition_t *part = &app->parts[i];
                         if (part->type == 1 && part->subtype == ESP_PARTITION_SUBTYPE_DATA_NVS)
                         {
-                            if (spi_flash_erase_range(offset, part->length) == ESP_OK)
+                            if (esp_flash_erase_region(NULL, offset, part->length) == ESP_OK)
                                 DisplayNotification("Operation successful!");
                             else
                                 DisplayNotification("An error has occurred!");
@@ -1315,15 +1247,15 @@ static void start_normal(void)
                         break;
                     }
                     DisplayMessage("Formatting... (be patient)");
-                    sdcardret = odroid_sdcard_format(0);
+                    //sdcardret = odroid_sdcard_format(0);
                     if (sdcardret == ESP_OK) {
                         sdcardret = odroid_sdcard_open();
                     }
                     if (sdcardret == ESP_OK) {
                         char path[32] = SDCARD_BASE_PATH "/odroid";
-                        mkdir(path, 0777);
+                        f_mkdir(path);
                         strcat(path, "/firmware");
-                        mkdir(path, 0777);
+                        f_mkdir(path);
                         DisplayMessage("Card formatted!");
                     } else {
                         DisplayError("Format failed!");
@@ -1373,13 +1305,11 @@ static void start_install(void)
         panic_abort("CORRUPT INSTALLER ERROR");
     }
 
-    SET_STATUS_LED(1);
-
     size_t size = ALIGN_ADDRESS(payload->size, FLASH_BLOCK_SIZE);
     void *data = safe_alloc(size);
 
     // We must copy the data to RAM first because our data address space is full, can't mmap
-    if (spi_flash_read(payload->address, data, payload->size) != ESP_OK)
+    if (esp_flash_read(NULL, data, payload->address, payload->size) != ESP_OK)
     {
         panic_abort("PART TABLE WRITE ERROR");
     }
@@ -1387,12 +1317,12 @@ static void start_install(void)
     // It would be nicer to do the erase/write in blocks to be able to show progress
     // but, because of the shared SPI bus, I think it is safer to do it in one go.
 
-    if (spi_flash_erase_range(0x0, size) != ESP_OK)
+    if (esp_flash_erase_region(NULL, 0x0, size) != ESP_OK)
     {
         panic_abort("PART TABLE ERASE ERROR");
     }
 
-    if (spi_flash_write(0x0, data, size) != ESP_OK)
+    if (esp_flash_write(NULL, data, 0x0, size) != ESP_OK)
     {
         panic_abort("PART TABLE WRITE ERROR");
     }
@@ -1406,27 +1336,19 @@ void app_main(void)
 {
     printf("\n\n############### odroid-go-multi-firmware (Ver: "PROJECT_VER") ###############\n\n");
 
-    gpio_set_direction(GPIO_NUM_2, GPIO_MODE_OUTPUT);
-    SET_STATUS_LED(1);
-
-    // Has to be before LCD
-    sdcardret = odroid_sdcard_open();
     ili9341_init();
+    odroid_sdcard_open();
     input_init();
 
     UG_Init(&gui, pset, SCREEN_WIDTH, SCREEN_HEIGHT);
 
-    SET_STATUS_LED(0);
-
     // Start the installation process if we didn't boot from the factory app partition
     if (esp_ota_get_running_partition()->subtype != ESP_PARTITION_SUBTYPE_APP_FACTORY)
     {
-        ESP_LOGI(__func__, "Non-factory startup, launching installer...");
         start_install();
     }
     else
     {
-        ESP_LOGI(__func__, "Factory startup, launching normally...");
         start_normal();
     }
 

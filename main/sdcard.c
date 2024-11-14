@@ -1,11 +1,9 @@
 #include <esp_log.h>
 #include <esp_vfs_fat.h>
-#include <driver/sdmmc_host.h>
-#include <driver/sdspi_host.h>
 #include <sdmmc_cmd.h>
 #include <diskio.h>
 #include <esp_heap_caps.h>
-#include <esp_log.h>
+#include "esp_spiffs.h"
 
 #include <dirent.h>
 #include <strings.h>
@@ -15,29 +13,15 @@
 
 #include "sdcard.h"
 
+#define SD_PIN_NUM_CS 22
+#define SD_PIN_NUM_MISO 19
+#define SD_PIN_NUM_MOSI 23
+#define SD_PIN_NUM_CLK  18
+
+static const char *TAG = "RETRO-RULER";
+
 extern esp_err_t ff_diskio_get_drive(BYTE* out_pdrv);
 extern void ff_diskio_register_sdmmc(unsigned char pdrv, sdmmc_card_t* card);
-
-#ifdef TARGET_MRGC_G32
-#define DECLARE_SDCARD_CONFIG() \
-        sdmmc_host_t host_config = SDMMC_HOST_DEFAULT(); \
-        host_config.flags = SDMMC_HOST_FLAG_1BIT; \
-        host_config.max_freq_khz = SDMMC_FREQ_HIGHSPEED; \
-        sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT(); \
-        slot_config.width = 1;
-#else
-#define DECLARE_SDCARD_CONFIG() \
-        sdmmc_host_t host_config = SDSPI_HOST_DEFAULT(); \
-        host_config.slot = HSPI_HOST; \
-        host_config.max_freq_khz = SDMMC_FREQ_DEFAULT; \
-        sdspi_slot_config_t slot_config = SDSPI_SLOT_CONFIG_DEFAULT(); \
-        slot_config.gpio_miso = GPIO_NUM_19; \
-        slot_config.gpio_mosi = GPIO_NUM_23; \
-        slot_config.gpio_sck  = GPIO_NUM_18; \
-        slot_config.gpio_cs = GPIO_NUM_22; \
-        //slot_config.dma_channel = 2;
-#endif
-
 
 inline static void swap(char** a, char** b)
 {
@@ -55,7 +39,7 @@ static int strcicmp(char const *a, char const *b)
     }
 }
 
-static int partition (char* arr[], int low, int high)
+static int partition(char* arr[], int low, int high)
 {
     char* pivot = arr[high];
     int i = (low - 1);
@@ -104,7 +88,6 @@ int odroid_sdcard_files_get(const char* path, const char* extension, char*** fil
     DIR *dir = opendir(path);
     if( dir == NULL )
     {
-        ESP_LOGE(__func__, "opendir failed.");
         return 0;
     }
 
@@ -152,22 +135,27 @@ void odroid_sdcard_files_free(char** files, int count)
 
 esp_err_t odroid_sdcard_open(void)
 {
-    DECLARE_SDCARD_CONFIG();
-
     esp_vfs_fat_sdmmc_mount_config_t mount_config = {
-        .format_if_mount_failed = false,
-        .max_files = 5,
+            .format_if_mount_failed = false,
+            .max_files = 5,
+            .allocation_unit_size = 16 * 1024,
     };
 
-    esp_err_t ret = esp_vfs_fat_sdmmc_mount(SDCARD_BASE_PATH, &host_config, &slot_config, &mount_config, NULL);
+    sdmmc_card_t* card;
+
+    sdmmc_host_t host_config = SDSPI_HOST_DEFAULT();
+    host_config.slot = HSPI_HOST;
+
+    sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
+    slot_config.gpio_cs =  SD_PIN_NUM_CS;
+    slot_config.host_id = host_config.slot;
+
+    ESP_LOGI(TAG, "Mounting SD card");
+    esp_err_t ret = esp_vfs_fat_sdspi_mount(SDCARD_BASE_PATH, &host_config, &slot_config, &mount_config, &card);
 
     if (ret == ESP_OK || ret == ESP_ERR_INVALID_STATE)
     {
         ret = ESP_OK;
-    }
-    else
-    {
-        ESP_LOGE(__func__, "esp_vfs_fat_sdmmc_mount failed (%d)", ret);
     }
 
     return ret;
@@ -176,15 +164,10 @@ esp_err_t odroid_sdcard_open(void)
 esp_err_t odroid_sdcard_close(void)
 {
     esp_err_t ret = esp_vfs_fat_sdmmc_unmount();
-
-    if (ret != ESP_OK)
-    {
-        ESP_LOGE(__func__, "esp_vfs_fat_sdmmc_unmount failed (%d)", ret);
-    }
-
     return ret;
 }
 
+/*
 esp_err_t odroid_sdcard_format(int fs_type)
 {
     esp_err_t err = ESP_FAIL;
@@ -193,8 +176,8 @@ esp_err_t odroid_sdcard_format(int fs_type)
     void *buffer = malloc(4096);
     DWORD partitions[] = {100, 0, 0, 0};
     BYTE drive = 0xFF;
-
-    DECLARE_SDCARD_CONFIG();
+    
+    sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
 
     if (buffer == NULL) {
         return false;
@@ -214,14 +197,10 @@ esp_err_t odroid_sdcard_format(int fs_type)
         goto _cleanup;
     }
 
-#ifdef TARGET_MRGC_G32
     err = sdmmc_host_init_slot(host_config.slot, &slot_config);
-#else
-    err = sdspi_host_init_slot(host_config.slot, &slot_config);
-#endif
 
     if (err != ESP_OK) {
-        errmsg = "sdspi_host_init_slot() failed";
+        errmsg = "sdmmc_host_init_slot() failed";
         goto _cleanup;
     }
 
@@ -233,14 +212,12 @@ esp_err_t odroid_sdcard_format(int fs_type)
 
     ff_diskio_register_sdmmc(drive, &card);
 
-    ESP_LOGI(__func__, "partitioning card %d", drive);
     if (f_fdisk(drive, partitions, buffer) != FR_OK) {
         errmsg = "f_fdisk() failed";
         err = ESP_FAIL;
         goto _cleanup;
     }
 
-    ESP_LOGI(__func__, "formatting card %d", drive);
     char path[3] = {(char)('0' + drive), ':', 0};
     if (f_mkfs(path, fs_type ? FM_EXFAT : FM_FAT32, 0, buffer, 4096) != FR_OK) {
         errmsg = "f_mkfs() failed";
@@ -252,15 +229,10 @@ esp_err_t odroid_sdcard_format(int fs_type)
 
 _cleanup:
 
-    if (err == ESP_OK) {
-        ESP_LOGI(__func__, "%s", errmsg);
-    } else {
-        ESP_LOGE(__func__, "%s (%d)", errmsg, err);
-    }
-
     free(buffer);
     host_config.deinit();
     ff_diskio_register_sdmmc(drive, NULL);
 
     return err;
 }
+*/
